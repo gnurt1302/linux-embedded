@@ -111,7 +111,7 @@ void log_process(void)
 
 void *connection_manager(void *arg)
 {
-	int server_fd, new_socket_fd, fifo_fd;
+	int server_fd, new_socket_fd_fd, fifo_fd;
 	int addr_len;
 	struct sockaddr_in client_addr;
 	
@@ -122,22 +122,6 @@ void *connection_manager(void *arg)
 	socket_init(&port);
 	addr_len = sizeof(client_addr);
 	
-	// while(1)
-	// {
-	// 	printf("Server is listening at port: %d \n....\n",port);
-	// 	new_socket_fd  = accept(server_fd, (struct sockaddr*)&client_addr, (socklen_t *)&addr_len);
-	// 	if (new_socket_fd < 0)
-    //         handle_error("accept()");
-	// 	printf("Server: got connection \n");
-	// 	while (1)
-	// 	{
-	// 		char recvbuff_from_socket[BUFF_SIZE];
-	// 		int numb_read = read(new_socket_fd, recvbuff_from_socket, BUFF_SIZE);
-	// 		if(numb_read == -1)
-	// 			handle_error("read()");
-	// 		printf("Message from sensor node: %s\n", recvbuff_from_socket);
-	// 	}
-	// }
 
 	close(server_fd);
 
@@ -166,11 +150,11 @@ void get_timestamp(char *buffer, size_t buffer_size)
 
 void socket_init(int *port)
 {
-	int server_fd, client_fd, epoll_fd;
-	int new_socket;
+	int server_fd, client_fd, epoll_fd, new_socket_fd_fd;
+	int new_socket_fd;
 	int n_events;
 	int opt = 1;
-	char buffer[BUFF_SIZE];
+	char buffer[BUFF_SIZE], log_event[BUFF_SIZE];
 
 	struct sockaddr_in server_addr, client_addr;
 	struct epoll_event ev, events[MAX_EVENTS];
@@ -220,18 +204,19 @@ void socket_init(int *port)
 		// Process each event
 		for (int i = 0; i < n_events; i++) {
 			if (events[i].data.fd == server_fd){
-				new_socket = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
-                if (new_socket < 0) 
+				new_socket_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
+                if (new_socket_fd < 0) 
                     handle_error("accept()");
 				
                 printf("New connection: socket fd %d, IP %s, port %d\n",
-                       new_socket, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-				
+                       new_socket_fd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+				printf("A sensor node with <sensorNodeID> has opened a new connection");
+
 				ev.events = EPOLLIN;
-                ev.data.fd = new_socket;
+                ev.data.fd = new_socket_fd;
 				
-				if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &ev) < 0) 
-                    handle_error("epoll_ctl: new_socket");
+				if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket_fd, &ev) < 0) 
+                    handle_error("epoll_ctl: new_socket_fd");
 
 			} else {
 				client_fd = events[i].data.fd;
@@ -239,6 +224,7 @@ void socket_init(int *port)
                 if (valread <= 0) {
                     // Client disconnected or error
                     printf("Client disconnected: socket fd %d\n", client_fd);
+					printf("The sensor node with <sensorNodeID> has closed the connection");
                     close(client_fd);
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
                 } else {
