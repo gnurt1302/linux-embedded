@@ -17,10 +17,11 @@
 #define BUFF_SIZE   		1024
 #define LISTEN_BACKLOG 		10
 #define MAX_EVENTS 			10
+#define INIT_VALUE_CAPA		100
+
 
 #define handle_error(msg) \
     do { perror(msg); exit(EXIT_FAILURE); } while (0)
-
 
 
 int sequence_number = 0;
@@ -30,20 +31,31 @@ int flag;
 pthread_mutex_t fifo_mutex 			= PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t shared_data_mutex 	= PTHREAD_MUTEX_INITIALIZER;
 
-struct sharedData
+typedef struct node
 {
+	int nodeID;
+	int fd;
+	float *value;
+	int value_count;
+	int value_capa;
+	struct node *next;
+} sensor_node_t;
 
-};
+sensor_node_t *head;
+int current_nodeID = 1;
+
+void add_node(int fd);
+void remove_node(int fd);
+void store_sensor_data(int fd, char *msg);
 
 void log_process(void);
 void thread_manager(void);
 void *connection_manager(void *arg);
 void *data_manager(void *arg);
 void *storage_manager(void *arg);
+
 void get_timestamp(char *buffer, size_t buffer_size);
-
 void write_to_fifo(char *log_event);
-
 void socket_init(int *port);
 
 
@@ -81,6 +93,67 @@ void main(int argc, char *argv[])
 	}
 	
 	unlink(FIFO_FILE);
+}
+
+void add_node(int fd)
+{
+	sensor_node_t *current_node = head;
+	
+	while(current_node != NULL){
+		if (current_node->fd == fd){
+			return;
+		}
+	}
+	
+	sensor_node_t *new_sensor_node = (sensor_node_t*)malloc(sizeof(sensor_node_t));
+	
+	new_sensor_node->fd 	= fd;
+	new_sensor_node->nodeID = current_nodeID++;
+	new_sensor_node->value_capa = INIT_VALUE_CAPA;
+    new_sensor_node->value_count = 0;
+    new_sensor_node->value = (float*)malloc(new_sensor_node->value_capa * sizeof(float));
+	new_sensor_node->next 	= NULL;
+	
+	head = new_sensor_node;
+	
+	printf("A sensor node with sensorNodeID: %d has opened a new connection.\n", new_sensor_node->nodeID);
+}
+
+void remove_node(int fd)
+{
+	sensor_node_t *prev_node = NULL;
+	sensor_node_t *current_node = head;
+	while(current_node != NULL){
+		if (current_node->fd == fd){
+			if (prev_node == NULL) {
+                head = current_node->next;
+            } else {
+                prev_node->next = current_node->next;
+            }
+			printf("The sensor node with sensorNodeID:%d has closed the connection\n", current_node->nodeID);
+			free(current_node);
+			return;
+		}
+		prev_node = current_node;
+		current_node = current_node->next;
+	}
+}
+void store_sensor_data(int fd, char *msg)
+{	
+	float value = atof(msg);
+	sensor_node_t *current_node = head;
+	
+	while(current_node != NULL){
+		if (current_node->fd == fd){
+			if (current_node->value_count == current_node->value_capa) {
+				current_node->value_capa *= 2;
+				current_node->value = (float*)realloc(current_node->value, current_node->value_capa * sizeof(float));
+			}
+			 printf("Node ID %d: Received value %.2f\n", current_node->nodeID, value);
+			return;
+		}
+		current_node = current_node->next;
+	}
 }
 
 void log_process(void)
@@ -183,7 +256,7 @@ void socket_init(int *port)
 	if (listen(server_fd, LISTEN_BACKLOG) < 0)
         handle_error("listen()");
 
-	printf("Server listening on port %d\n", *port);
+	printf("Server listening on port %d ...\n", *port);
 
 	if ((epoll_fd = epoll_create1(0)) < 0) 
         handle_error("epoll_create1()");
@@ -210,7 +283,7 @@ void socket_init(int *port)
 				
                 printf("New connection: socket fd %d, IP %s, port %d\n",
                        new_socket_fd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-				printf("A sensor node with <sensorNodeID> has opened a new connection");
+				add_node(new_socket_fd);
 
 				ev.events = EPOLLIN;
                 ev.data.fd = new_socket_fd;
@@ -224,13 +297,14 @@ void socket_init(int *port)
                 if (valread <= 0) {
                     // Client disconnected or error
                     printf("Client disconnected: socket fd %d\n", client_fd);
-					printf("The sensor node with <sensorNodeID> has closed the connection");
+					remove_node(client_fd);
                     close(client_fd);
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
                 } else {
                     // Null-terminate the buffer and process the message
                     buffer[valread] = '\0';
                     printf("Message from client (fd %d): %s\n", client_fd, buffer);
+					store_sensor_data(client_fd, buffer);
                 }
 			}
 		}
@@ -252,3 +326,6 @@ void write_to_fifo(char *log_event)
 	close(fifo_fd);
 	pthread_mutex_unlock(&fifo_mutex);
 }
+
+
+
