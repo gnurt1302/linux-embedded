@@ -42,11 +42,12 @@ typedef struct node
 } sensor_node_t;
 
 sensor_node_t *head;
-int current_nodeID = 1;
+int count_nodeID = 1;
 
 void add_node(int fd);
 void remove_node(int fd);
 void store_sensor_data(int fd, char *msg);
+void fetch_sensor_data();
 
 void log_process(void);
 void thread_manager(void);
@@ -107,12 +108,12 @@ void add_node(int fd)
 	
 	sensor_node_t *new_sensor_node = (sensor_node_t*)malloc(sizeof(sensor_node_t));
 	
-	new_sensor_node->fd 	= fd;
-	new_sensor_node->nodeID = current_nodeID++;
-	new_sensor_node->value_capa = INIT_VALUE_CAPA;
-    new_sensor_node->value_count = 0;
-    new_sensor_node->value = (float*)malloc(new_sensor_node->value_capa * sizeof(float));
-	new_sensor_node->next 	= NULL;
+	new_sensor_node->fd 			= fd;
+	new_sensor_node->nodeID 		= count_nodeID++;
+	new_sensor_node->value_capa 	= INIT_VALUE_CAPA;
+    new_sensor_node->value_count 	= 0;
+    new_sensor_node->value 			= (float*)malloc(new_sensor_node->value_capa * sizeof(float));
+	new_sensor_node->next 			= NULL;
 	
 	head = new_sensor_node;
 	
@@ -138,6 +139,7 @@ void remove_node(int fd)
 		current_node = current_node->next;
 	}
 }
+
 void store_sensor_data(int fd, char *msg)
 {	
 	float value = atof(msg);
@@ -149,9 +151,29 @@ void store_sensor_data(int fd, char *msg)
 				current_node->value_capa *= 2;
 				current_node->value = (float*)realloc(current_node->value, current_node->value_capa * sizeof(float));
 			}
-			 printf("Node ID %d: Received value %.2f\n", current_node->nodeID, value);
+			printf("Node ID %d: Received value %.2f\n", current_node->nodeID, value);
 			return;
 		}
+		current_node = current_node->next;
+	}
+}
+
+void fetch_sensor_data()
+{
+	sensor_node_t *current_node = head;
+
+	float **temp = (float**)realloc(temp, count_nodeID * sizeof(float*));
+	for(int i = 0; i < count_nodeID; i++){
+		temp[i] = (float*)malloc(current_node->value_capa * sizeof(float));
+	}
+
+	while(current_node != NULL){
+		for(int i = 0; i < current_node->value_capa; i++){
+			temp[current_node->nodeID] = current_node->value;
+			printf("Value: %2.f", temp[current_node->nodeID][i]);
+		}
+
+			
 		current_node = current_node->next;
 	}
 }
@@ -184,21 +206,12 @@ void log_process(void)
 
 void *connection_manager(void *arg)
 {
-	int server_fd, new_socket_fd_fd, fifo_fd;
-	int addr_len;
-	struct sockaddr_in client_addr;
-	
 	/* TCP socket connection */
 	char **argbuff = (char **) arg;
 	int port = atoi(argbuff[1]);
 
 	socket_init(&port);
-	addr_len = sizeof(client_addr);
-	
 
-	close(server_fd);
-
-	
 	return NULL;
 
 }
@@ -234,6 +247,7 @@ void socket_init(int *port)
 
     memset(&server_addr, 0, sizeof(struct sockaddr_in));
 	int addr_len = sizeof(client_addr);
+
 	/* Create socket */
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (server_fd < 0)
@@ -293,18 +307,20 @@ void socket_init(int *port)
 
 			} else {
 				client_fd = events[i].data.fd;
-                int valread = read(client_fd, buffer, BUFF_SIZE - 1);
-                if (valread <= 0) {
-                    // Client disconnected or error
+                int byte_read = read(client_fd, buffer, BUFF_SIZE);
+                if (byte_read > 0) {
+                    // Null-terminate the buffer and process the message
+                    buffer[byte_read] = '\0';
+                    printf("Message from client (fd %d): %s", client_fd, buffer);
+					store_sensor_data(client_fd, buffer);
+					//fetch_sensor_data();
+                } else {
+					// Client disconnected or error
                     printf("Client disconnected: socket fd %d\n", client_fd);
 					remove_node(client_fd);
                     close(client_fd);
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-                } else {
-                    // Null-terminate the buffer and process the message
-                    buffer[valread] = '\0';
-                    printf("Message from client (fd %d): %s\n", client_fd, buffer);
-					store_sensor_data(client_fd, buffer);
+					
                 }
 			}
 		}
