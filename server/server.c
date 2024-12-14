@@ -23,13 +23,15 @@
 #define handle_error(msg) \
     do { perror(msg); exit(EXIT_FAILURE); } while (0)
 
-
+int count = 1;
 int sequence_number = 0;
 char log_event[BUFF_SIZE];
 int flag;
+int new_data_flag = 0;
 
 pthread_mutex_t fifo_mutex 			= PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t shared_data_mutex 	= PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t 	new_data_cond 		= PTHREAD_COND_INITIALIZER;
 
 typedef struct node
 {
@@ -71,7 +73,6 @@ void main(int argc, char *argv[])
 		log_process();
 	} else if (log > 0) {
 		/* Main process */
-
 		if (argc < 2) {
 			printf("No port provided\n");
 			printf("Command: ./main <port number>\n");
@@ -92,6 +93,8 @@ void main(int argc, char *argv[])
 		// Error
 		printf("Fork failed.\n");
 	}
+
+	
 	
 	unlink(FIFO_FILE);
 }
@@ -151,6 +154,9 @@ void store_sensor_data(int fd, char *msg)
 				current_node->value_capa *= 2;
 				current_node->value = (float*)realloc(current_node->value, current_node->value_capa * sizeof(float));
 			}
+			current_node->value[current_node->value_count++] = value;
+			new_data_flag = 1;
+			pthread_cond_signal(&new_data_cond);
 			printf("Node ID %d: Received value %.2f\n", current_node->nodeID, value);
 			return;
 		}
@@ -158,25 +164,6 @@ void store_sensor_data(int fd, char *msg)
 	}
 }
 
-void fetch_sensor_data()
-{
-	sensor_node_t *current_node = head;
-
-	float **temp = (float**)realloc(temp, count_nodeID * sizeof(float*));
-	for(int i = 0; i < count_nodeID; i++){
-		temp[i] = (float*)malloc(current_node->value_capa * sizeof(float));
-	}
-
-	while(current_node != NULL){
-		for(int i = 0; i < current_node->value_capa; i++){
-			temp[current_node->nodeID] = current_node->value;
-			printf("Value: %2.f", temp[current_node->nodeID][i]);
-		}
-
-			
-		current_node = current_node->next;
-	}
-}
 
 void log_process(void)
 {
@@ -206,11 +193,115 @@ void log_process(void)
 
 void *connection_manager(void *arg)
 {
-	/* TCP socket connection */
 	char **argbuff = (char **) arg;
 	int port = atoi(argbuff[1]);
 
-	socket_init(&port);
+	int server_fd, client_fd, epoll_fd, new_socket_fd_fd;
+	int new_socket_fd;
+	int n_events;
+	int opt = 1;
+	char buffer[BUFF_SIZE], log_event[BUFF_SIZE];
+
+	struct sockaddr_in server_addr, client_addr;
+	struct epoll_event ev, events[MAX_EVENTS];
+
+    memset(&server_addr, 0, sizeof(struct sockaddr_in));
+	int addr_len = sizeof(client_addr);
+
+	// Create socket 
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (server_fd < 0)
+        handle_error("socket()");
+	
+	// Prevent error: “address already in use” 
+	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+        handle_error("setsockopt()");
+	
+	// Init server address 
+	server_addr.sin_family		= AF_INET;
+    server_addr.sin_port		= htons(port);
+	server_addr.sin_addr.s_addr = INADDR_ANY;
+
+	// Bind socket to address 
+	if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
+		handle_error("bind()");
+		
+	// Listen to incoming connections 
+	if (listen(server_fd, LISTEN_BACKLOG) < 0)
+        handle_error("listen()");
+
+	printf("Server listening on port %d ...\n", port);
+
+	// Create epoll instance 
+	if ((epoll_fd = epoll_create1(0)) < 0) 
+        handle_error("epoll_create1()");
+	
+	// Add the server socket to the epoll instance 
+	ev.events = EPOLLIN;
+    ev.data.fd = server_fd;
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev) < 0) 
+        handle_error("epoll_ctl: server_fd");
+    
+	// Main loop for connection management
+	while(1)
+	{
+		// Wait for events on the epoll instance
+		n_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        if (n_events < 0){
+			handle_error("epoll_wait");
+			continue;
+		}
+            
+		// Process each event
+		for (int i = 0; i < n_events; i++) {
+			if (events[i].data.fd == server_fd){
+				// Accept new connection
+				new_socket_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
+                if (new_socket_fd < 0) 
+                    handle_error("accept()");
+
+				// Add new client to epoll
+				ev.events 	= EPOLLIN;
+                ev.data.fd 	= new_socket_fd;
+
+				if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket_fd, &ev) < 0) 
+                    handle_error("epoll_ctl: new_socket_fd");
+				
+				// Add to sensor node list
+				printf("New connection: socket fd %d, IP %s, port %d\n",
+                       new_socket_fd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+				pthread_mutex_lock(&shared_data_mutex);
+				add_node(new_socket_fd);
+				pthread_mutex_unlock(&shared_data_mutex);
+			} else {
+				// Handle data from existing client
+				client_fd = events[i].data.fd;
+                int byte_read = read(client_fd, buffer, BUFF_SIZE);
+
+                if (byte_read > 0) {
+					// Process received data
+                    // Null-terminate the buffer and process the message
+                    buffer[byte_read] = '\0';
+                    printf("Message from client (fd %d): %s", client_fd, buffer);
+					pthread_mutex_lock(&shared_data_mutex);
+					store_sensor_data(client_fd, buffer);
+					pthread_mutex_unlock(&shared_data_mutex);
+                } else {
+					// Client disconnected or error
+                    printf("Client disconnected: socket fd %d\n", client_fd);
+					// Remove client from linked list
+					pthread_mutex_lock(&shared_data_mutex);
+					remove_node(client_fd);
+					pthread_mutex_unlock(&shared_data_mutex);
+					// Remove client from epoll and close socket
+                    close(client_fd);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+                }
+			}
+		}
+	}
+	close(server_fd);
+    close(epoll_fd);
 
 	return NULL;
 
@@ -218,8 +309,40 @@ void *connection_manager(void *arg)
 
 void *data_manager(void *arg)
 {
+	while(1)
+	{
+		pthread_mutex_lock(&shared_data_mutex);
+		while (!new_data_flag)
+        {
+            pthread_cond_wait(&new_data_cond, &shared_data_mutex);
+        }
+		sensor_node_t *current_node = head;
+		float sum_value, avg_value;
+		
+		while(current_node != NULL){
+			for (int i = 0; i < current_node->value_count; i++) {
+				printf("NodeID %d - Value %d: %.2f\n", current_node->nodeID, i + 1, current_node->value[i]);
+				sum_value += current_node->value[i];
+			}
+			avg_value = sum_value / current_node->value_count;
+			if (avg_value >= 20)
+				printf("The sensor node with sensorNodeID: %d reports it’s too hot (avg temperature = %.2f)\n", current_node->nodeID, avg_value);
+			else if (avg_value < 20)
+				printf("The sensor node with sensorNodeID: %d reports it’s too cold (avg temperature = %.2f\n)", current_node->nodeID, avg_value);
+			else 
+				printf("Received sensor data with invalid sensor node ID: %d\n",current_node->nodeID);
+
+			sum_value = 0;
+			current_node = current_node->next;
+		}
+		new_data_flag = 0;
+		pthread_mutex_unlock(&shared_data_mutex);
+		sleep(5);
+	}
+	
 	return NULL;
 }
+
 
 void *storage_manager(void *arg)
 {
@@ -320,7 +443,6 @@ void socket_init(int *port)
 					remove_node(client_fd);
                     close(client_fd);
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-					
                 }
 			}
 		}
